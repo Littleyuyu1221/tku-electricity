@@ -7,9 +7,9 @@ from sklearn.linear_model import LinearRegression
 import datetime
 
 # --- 網頁配置 ---
-st.set_page_config(page_title="松濤一館用電組成拆解系統", layout="wide")
+st.set_page_config(page_title="學生宿舍用電組成拆解系統", layout="wide")
 
-st.title("🏫 松濤一館用電組成拆解與節能預測系統")
+st.title("🏫 學生宿舍用電組成拆解與節能預測系統")
 st.markdown("本系統透過迴歸模型將總用電量區分為 **空調、熱水、照明/插座、基礎負載**。")
 
 # --- 側邊欄：參數設定 ---
