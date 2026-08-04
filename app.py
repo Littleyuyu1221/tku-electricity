@@ -15,37 +15,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# 高齡友善：大字、高對比、大型操作區，並減少畫面中的次要元素。
-st.markdown(
-    """
-    <style>
-    .stApp { background-color: #ffffff; color: #111827; }
-    html, body, [class*="css"] { font-size: 19px; }
-    h1 { font-size: 2.25rem !important; line-height: 1.25 !important; color: #0b356b !important; }
-    h2, h3 { color: #0b356b !important; }
-    [data-testid="stMetric"] {
-        background: #f4f8ff;
-        border: 2px solid #9ab8df;
-        border-radius: 12px;
-        padding: 16px;
-    }
-    [data-testid="stMetricLabel"] p { font-size: 1.05rem !important; color: #24364b !important; }
-    [data-testid="stMetricValue"] { font-size: 1.75rem !important; color: #082f63 !important; }
-    [data-testid="stSidebar"] { background: #eef5ff; }
-    [data-testid="stSidebar"] * { font-size: 1rem; }
-    .stButton button, .stDownloadButton button {
-        min-height: 48px;
-        font-size: 1.05rem;
-        border: 2px solid #315f97;
-    }
-    div[data-baseweb="select"] > div { min-height: 52px; font-size: 1.1rem; }
-    .stAlert { font-size: 1.05rem; border-width: 2px; }
-    .stDataFrame { font-size: 1rem; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 BLUE = "#0757A6"
 ORANGE = "#D76800"
 GREEN = "#18794E"
@@ -60,37 +29,37 @@ CHART_CONFIG = {
 }
 
 
-def senior_chart(fig: go.Figure, height: int = 430) -> go.Figure:
-    """套用一致的大字、高對比圖表格式。"""
+def standard_chart(fig: go.Figure, height: int = 410) -> go.Figure:
+    """套用一致的圖表格式。"""
     fig.update_layout(
         height=height,
-        font=dict(size=18, color="#111827"),
-        title=dict(font=dict(size=24, color="#0B356B"), x=0.01),
-        legend=dict(font=dict(size=17), orientation="h", y=1.12, x=0),
-        hoverlabel=dict(font_size=18),
+        font=dict(size=15),
+        title=dict(font=dict(size=21), x=0.01),
+        legend=dict(font=dict(size=14), orientation="h", y=1.12, x=0),
+        hoverlabel=dict(font_size=14),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=65, r=45, t=90, b=65),
+        margin=dict(l=55, r=35, t=80, b=55),
     )
     fig.update_xaxes(
-        title_font=dict(size=18),
-        tickfont=dict(size=17),
+        title_font=dict(size=15),
+        tickfont=dict(size=14),
         gridcolor="#D8DEE8",
         linecolor="#64748B",
-        linewidth=2,
+        linewidth=1,
     )
     fig.update_yaxes(
-        title_font=dict(size=18),
-        tickfont=dict(size=17),
+        title_font=dict(size=15),
+        tickfont=dict(size=14),
         gridcolor="#D8DEE8",
         linecolor="#64748B",
-        linewidth=2,
+        linewidth=1,
     )
     return fig
 
 
 st.title("⚡ 宿舍用電分析與節能系統")
-st.write("用簡單的大字與圖表，看懂住宿人數、開館天數、溫度和用電的關係。")
+st.write("透過互動圖表分析住宿人數、開館天數、溫度和用電的關係。")
 
 SAMPLE = pd.DataFrame(
     {
@@ -265,7 +234,7 @@ if page == "① 快速看懂用電":
     )
     trend.update_layout(title="每個月用了多少電？", xaxis_title="月份", yaxis_title="用電量（度）", showlegend=False)
     trend.update_xaxes(dtick=1)
-    st.plotly_chart(senior_chart(trend), use_container_width=True, config=CHART_CONFIG)
+    st.plotly_chart(standard_chart(trend), use_container_width=True, config=CHART_CONFIG)
 
     ranking = df.sort_values("總用電_kWh", ascending=True)
     rank_fig = px.bar(
@@ -281,7 +250,7 @@ if page == "① 快速看懂用電":
     )
     rank_fig.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
     rank_fig.update_coloraxes(showscale=False)
-    st.plotly_chart(senior_chart(rank_fig, 500), use_container_width=True, config=CHART_CONFIG)
+    st.plotly_chart(standard_chart(rank_fig, 500), use_container_width=True, config=CHART_CONFIG)
 
 elif page == "② 住宿人數與開館":
     st.header("② 住宿人數與開館")
@@ -311,7 +280,7 @@ elif page == "② 住宿人數與開館":
         yaxis=dict(title="天數"),
         yaxis2=dict(title="溫度（°C）", overlaying="y", side="right", showgrid=False),
     )
-    st.plotly_chart(senior_chart(operation_fig), use_container_width=True, config=CHART_CONFIG)
+    st.plotly_chart(standard_chart(operation_fig), use_container_width=True, config=CHART_CONFIG)
 
     left, right = st.columns([3, 2])
     with left:
@@ -327,7 +296,7 @@ elif page == "② 住宿人數與開館":
             labels={"住宿人數": "住宿人數（人）", "總用電_kWh": "用電量（度）", "日平均溫度_C": "溫度（°C）"},
         )
         bubble.update_traces(marker=dict(line=dict(width=2, color="#FFFFFF")))
-        st.plotly_chart(senior_chart(bubble), use_container_width=True, config=CHART_CONFIG)
+        st.plotly_chart(standard_chart(bubble), use_container_width=True, config=CHART_CONFIG)
     with right:
         gauge = go.Figure(
             go.Indicator(
@@ -346,7 +315,7 @@ elif page == "② 住宿人數與開館":
                 },
             )
         )
-        st.plotly_chart(senior_chart(gauge), use_container_width=True, config=CHART_CONFIG)
+        st.plotly_chart(standard_chart(gauge), use_container_width=True, config=CHART_CONFIG)
         st.caption(f"開館天數加權的平均溫度：{weighted_temp:.1f} °C")
 
 elif page == "③ 電都用到哪裡":
@@ -379,7 +348,7 @@ elif page == "③ 電都用到哪裡":
         labels={"用電量_kWh": "用電量（度）"},
     )
     area.update_xaxes(dtick=1)
-    st.plotly_chart(senior_chart(area), use_container_width=True, config=CHART_CONFIG)
+    st.plotly_chart(standard_chart(area), use_container_width=True, config=CHART_CONFIG)
 
     left, right = st.columns(2)
     with left:
@@ -392,7 +361,7 @@ elif page == "③ 電都用到哪裡":
             title="全年用電占比",
         )
         pie.update_traces(textposition="inside", textinfo="label+percent", textfont_size=17)
-        st.plotly_chart(senior_chart(pie), use_container_width=True, config=CHART_CONFIG)
+        st.plotly_chart(standard_chart(pie), use_container_width=True, config=CHART_CONFIG)
     with right:
         pivot = long_df.pivot(index="用電類別", columns="月份", values="用電量_kWh").reindex(sums["用電類別"])
         heatmap = go.Figure(
@@ -406,7 +375,7 @@ elif page == "③ 電都用到哪裡":
             )
         )
         heatmap.update_layout(title="深色表示用電較多")
-        st.plotly_chart(senior_chart(heatmap), use_container_width=True, config=CHART_CONFIG)
+        st.plotly_chart(standard_chart(heatmap), use_container_width=True, config=CHART_CONFIG)
 
 elif page == "④ 可以省多少電":
     st.header("④ 可以省多少電")
@@ -470,9 +439,9 @@ elif page == "④ 可以省多少電":
 
     left, right = st.columns(2)
     with left:
-        st.plotly_chart(senior_chart(compare), use_container_width=True, config=CHART_CONFIG)
+        st.plotly_chart(standard_chart(compare), use_container_width=True, config=CHART_CONFIG)
     with right:
-        st.plotly_chart(senior_chart(contributions), use_container_width=True, config=CHART_CONFIG)
+        st.plotly_chart(standard_chart(contributions), use_container_width=True, config=CHART_CONFIG)
 
 elif page == "⑤ 下個月用電預測":
     st.header("⑤ 下個月用電預測")
@@ -511,7 +480,7 @@ elif page == "⑤ 下個月用電預測":
         )
         predicted_chart.update_layout(title="過去實際用電和模型估計", xaxis_title="月份", yaxis_title="用電量（度）")
         predicted_chart.update_xaxes(dtick=1)
-        st.plotly_chart(senior_chart(predicted_chart), use_container_width=True, config=CHART_CONFIG)
+        st.plotly_chart(standard_chart(predicted_chart), use_container_width=True, config=CHART_CONFIG)
 
         st.subheader("填寫下個月情況")
         row1, row2 = st.columns(2)
