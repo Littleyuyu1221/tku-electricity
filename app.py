@@ -317,9 +317,9 @@ with st.sidebar:
         carbon_factor = st.number_input(
             "每度電碳排（kg CO₂e）",
             min_value=0.0,
-            value=0.474,
+            value=0.466,
             step=0.001,
-            help="預設採經濟部能源署公布的 2024 年電力排碳係數；正式盤查請依資料年度與用電類別更新。",
+            help="預設採經濟部能源署公布的 2025 年產業用電排碳係數；正式盤查請依資料年度與學校電價類別更新。",
         )
 
 try:
