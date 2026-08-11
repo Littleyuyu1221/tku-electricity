@@ -1,4 +1,5 @@
 import io
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -68,6 +69,32 @@ TIME_BLOCKS = pd.DataFrame(
     }
 )
 
+AC_BATCH_SAMPLE = pd.DataFrame(
+    [
+        ["AC-A-01", "A棟寢室", "變頻一級能效", 1.45, 50, 6, 25, 26, 30, 70, 20, 35, 85, 8, 0],
+        ["AC-B-01", "B棟公共區", "分離式定頻", 1.90, 12, 10, 25, 26, 30, 30, 55, 75, 65, 14, 1],
+        ["AC-C-01", "C棟舊寢室", "窗型定頻（舊式）", 2.40, 20, 15, 25, 26, 30, 60, 15, 30, 80, 20, 2],
+    ],
+    columns=[
+        "設備群組_ID",
+        "位置",
+        "冷氣機型",
+        "額定功率_kW",
+        "台數",
+        "平均機齡_年",
+        "日平均溫度_C",
+        "設定溫度_C",
+        "每月運轉天數",
+        "使用率_00_06",
+        "使用率_06_12",
+        "使用率_12_18",
+        "使用率_18_24",
+        "距上次保養_月",
+        "近兩年故障次數",
+    ],
+)
+AC_BATCH_REQUIRED = list(AC_BATCH_SAMPLE.columns)
+
 
 def standard_chart(fig: go.Figure, height: int = 410) -> go.Figure:
     """套用一致的圖表格式。"""
@@ -125,6 +152,13 @@ def build_energy_model(model_df: pd.DataFrame):
         "CV_R2": r2_score(target, cv_predictions),
         "TRAIN_R2": r2_score(target, fitted_predictions),
     }
+    baseline_predictions = (target.sum() - target) / (len(target) - 1)
+    metrics["BASELINE_MAE"] = mean_absolute_error(target, baseline_predictions)
+    metrics["MAE_IMPROVEMENT"] = (
+        (metrics["BASELINE_MAE"] - metrics["MAE"]) / metrics["BASELINE_MAE"] * 100
+        if metrics["BASELINE_MAE"] > 0
+        else 0.0
+    )
     residuals = np.asarray(target) - cv_predictions
     uncertainty = 1.96 * np.std(residuals, ddof=1) if len(residuals) > 1 else 0.0
     coefficients = pd.DataFrame(
@@ -203,11 +237,22 @@ def estimate_ac_operation(
     return operation, risk
 
 
+def classify_ac_risk(annual_failure_percent: float) -> str:
+    if annual_failure_percent < 5:
+        return "低"
+    if annual_failure_percent < 15:
+        return "中"
+    if annual_failure_percent < 30:
+        return "高"
+    return "極高"
+
+
 st.title("⚡ 宿舍用電分析與節能系統")
 st.write("透過互動圖表分析住宿人數、開館天數、溫度和用電的關係。")
 
 SAMPLE = pd.DataFrame(
     {
+        "年份": [2024] * 12,
         "月份": range(1, 13),
         "總用電_kWh": [19521, 17634, 45606, 42192, 50989, 41913, 4682, 5681, 48200, 46000, 44000, 49000],
         "熱水用電_kWh": [6192, 5885, 15274, 9843, 11635, 7142, 1123, 1084, 12650, 11500, 11000, 12000],
@@ -223,7 +268,23 @@ REQUIRED = list(SAMPLE.columns)
 @st.cache_data
 def read_upload(raw: bytes, name: str) -> pd.DataFrame:
     stream = io.BytesIO(raw)
-    return pd.read_excel(stream) if name.lower().endswith(".xlsx") else pd.read_csv(stream)
+    if not name.lower().endswith(".xlsx"):
+        return pd.read_csv(stream)
+    excel = pd.ExcelFile(stream)
+    if "月用電資料" in excel.sheet_names:
+        return pd.read_excel(excel, sheet_name="月用電資料", header=4)
+    return pd.read_excel(excel)
+
+
+@st.cache_data
+def read_ac_upload(raw: bytes, name: str) -> pd.DataFrame:
+    stream = io.BytesIO(raw)
+    if not name.lower().endswith(".xlsx"):
+        return pd.read_csv(stream)
+    excel = pd.ExcelFile(stream)
+    if "冷氣設備清冊" in excel.sheet_names:
+        return pd.read_excel(excel, sheet_name="冷氣設備清冊", header=4)
+    return pd.read_excel(excel)
 
 
 with st.sidebar:
@@ -237,6 +298,15 @@ with st.sidebar:
         "text/csv",
         use_container_width=True,
     )
+    collection_workbook_path = Path(__file__).with_name("宿舍用電與冷氣資料蒐集範本.xlsx")
+    if collection_workbook_path.exists():
+        st.download_button(
+            "下載完整 Excel 蒐集工作簿",
+            collection_workbook_path.read_bytes(),
+            collection_workbook_path.name,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
     bed_capacity = st.number_input("宿舍總床位數", min_value=1, value=700, step=10)
 
     with st.expander("進階設定（一般不用更改）"):
@@ -260,6 +330,9 @@ except Exception as exc:
 
 if "平均溫度_C" in source.columns and "日平均溫度_C" not in source.columns:
     source = source.rename(columns={"平均溫度_C": "日平均溫度_C"})
+if "年份" not in source.columns:
+    source.insert(0, "年份", 2024)
+    st.info("上傳資料沒有「年份」欄，系統暫以 2024 年處理；跨年度分析請使用新版範本。")
 
 missing = [column for column in REQUIRED if column not in source.columns]
 if missing:
@@ -277,8 +350,14 @@ if df.empty:
 if df.isna().any().any():
     st.error("資料中有空白或非數字內容，請修正後重新上傳。")
     st.stop()
-if not df["月份"].between(1, 12).all() or df["月份"].duplicated().any():
-    st.error("月份必須介於 1 到 12，而且不可重複。")
+if not df["年份"].between(2000, 2100).all():
+    st.error("年份必須是 2000 到 2100 之間的西元年。")
+    st.stop()
+if not np.allclose(df[["年份", "月份"]], np.round(df[["年份", "月份"]])):
+    st.error("年份與月份必須是整數。")
+    st.stop()
+if not df["月份"].between(1, 12).all() or df[["年份", "月份"]].duplicated().any():
+    st.error("月份必須介於 1 到 12，而且同一個年份與月份不可重複。")
     st.stop()
 if (df.drop(columns=["日平均溫度_C"]) < 0).any().any():
     st.error("除溫度外，其餘欄位不可小於 0。")
@@ -295,7 +374,8 @@ if (df["熱水用電_kWh"] > df["總用電_kWh"]).any():
 if (df["住宿人數"] > bed_capacity).any():
     st.warning("有月份的住宿人數大於總床位數，請確認資料或左側床位設定。")
 
-df = df.sort_values("月份").reset_index(drop=True)
+df = df.sort_values(["年份", "月份"]).reset_index(drop=True)
+df["期間"] = df["年份"].astype(int).astype(str) + "-" + df["月份"].astype(int).astype(str).str.zfill(2)
 df["人日"] = df["住宿天數"] * df["住宿人數"]
 df["住房率_%"] = np.where(df["住宿天數"] > 0, df["住宿人數"] / bed_capacity * 100, 0)
 df["開館使用率_%"] = np.where(df["開館天數"] > 0, df["住宿天數"] / df["開館天數"] * 100, 0)
@@ -338,9 +418,9 @@ occupied_days = occupied["住宿天數"].sum()
 average_occupancy = occupied["人日"].sum() / (bed_capacity * occupied_days) * 100 if occupied_days else 0
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("全年用了多少電", f"{total:,.0f} 度")
-c2.metric("大約需要多少電費", f"{total * electricity_price:,.0f} 元")
-c3.metric("用電最多的月份", f"{int(peak['月份'])} 月")
+c1.metric("資料期間總用電", f"{total:,.0f} 度")
+c2.metric("估計總電費", f"{total * electricity_price:,.0f} 元")
+c3.metric("最高用電期間", peak["期間"])
 c4.metric("每人每天平均用電", f"{unit_kwh:.2f} 度")
 
 page = st.selectbox(
@@ -358,14 +438,14 @@ page = st.selectbox(
 if page == "① 快速看懂用電":
     st.header("① 快速看懂用電")
     st.info(
-        f"重點：{int(peak['月份'])} 月用電最多（{peak['總用電_kWh']:,.0f} 度）；"
-        f"{int(lowest['月份'])} 月最少（{lowest['總用電_kWh']:,.0f} 度）。"
+        f"重點：{peak['期間']} 用電最多（{peak['總用電_kWh']:,.0f} 度）；"
+        f"{lowest['期間']} 最少（{lowest['總用電_kWh']:,.0f} 度）。"
     )
 
     trend = go.Figure()
     trend.add_trace(
         go.Scatter(
-            x=df["月份"],
+            x=df["期間"],
             y=df["總用電_kWh"],
             name="每月用電",
             mode="lines+markers+text",
@@ -373,7 +453,7 @@ if page == "① 快速看懂用電":
             textposition="top center",
             line=dict(color=BLUE, width=5),
             marker=dict(size=12),
-            hovertemplate="%{x} 月：%{y:,.0f} 度<extra></extra>",
+            hovertemplate="%{x}：%{y:,.0f} 度<extra></extra>",
         )
     )
     trend.add_hline(
@@ -384,21 +464,21 @@ if page == "① 快速看懂用電":
         annotation_text=f"月平均 {average_monthly:,.0f} 度",
         annotation_font_size=17,
     )
-    trend.update_layout(title="每個月用了多少電？", xaxis_title="月份", yaxis_title="用電量（度）", showlegend=False)
-    trend.update_xaxes(dtick=1)
+    trend.update_layout(title="每個期間用了多少電？", xaxis_title="年月", yaxis_title="用電量（度）", showlegend=False)
+    trend.update_xaxes(tickangle=-45)
     st.plotly_chart(standard_chart(trend), use_container_width=True, config=CHART_CONFIG)
 
     ranking = df.sort_values("總用電_kWh", ascending=True)
     rank_fig = px.bar(
         ranking,
         x="總用電_kWh",
-        y=ranking["月份"].astype(int).astype(str) + " 月",
+        y="期間",
         orientation="h",
         text="總用電_kWh",
         color="總用電_kWh",
         color_continuous_scale=[[0, LIGHT_BLUE], [1, BLUE]],
-        title="月份用電量排名",
-        labels={"總用電_kWh": "用電量（度）", "y": "月份"},
+        title="年月用電量排名",
+        labels={"總用電_kWh": "用電量（度）", "期間": "年月"},
     )
     rank_fig.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
     rank_fig.update_coloraxes(showscale=False)
@@ -407,16 +487,16 @@ if page == "① 快速看懂用電":
 elif page == "② 住宿人數與開館":
     st.header("② 住宿人數與開館")
     st.info(
-        f"全年共住宿 {total_stay_days} 天、開館 {total_open_days} 天；"
+        f"資料期間共住宿 {total_stay_days} 天、開館 {total_open_days} 天；"
         f"有住宿月份的平均住房率約 {average_occupancy:.1f}%。"
     )
 
     operation_fig = go.Figure()
-    operation_fig.add_trace(go.Bar(x=df["月份"], y=df["住宿天數"], name="住宿天數", marker_color=BLUE))
-    operation_fig.add_trace(go.Bar(x=df["月份"], y=df["開館天數"], name="開館天數", marker_color=ORANGE))
+    operation_fig.add_trace(go.Bar(x=df["期間"], y=df["住宿天數"], name="住宿天數", marker_color=BLUE))
+    operation_fig.add_trace(go.Bar(x=df["期間"], y=df["開館天數"], name="開館天數", marker_color=ORANGE))
     operation_fig.add_trace(
         go.Scatter(
-            x=df["月份"],
+            x=df["期間"],
             y=df["日平均溫度_C"],
             name="日平均溫度",
             mode="lines+markers",
@@ -428,7 +508,7 @@ elif page == "② 住宿人數與開館":
     operation_fig.update_layout(
         title="住宿天數、開館天數與溫度",
         barmode="group",
-        xaxis=dict(title="月份", dtick=1),
+        xaxis=dict(title="年月", tickangle=-45),
         yaxis=dict(title="天數"),
         yaxis2=dict(title="溫度（°C）", overlaying="y", side="right", showgrid=False),
     )
@@ -442,7 +522,7 @@ elif page == "② 住宿人數與開館":
             y="總用電_kWh",
             size="開館天數",
             color="日平均溫度_C",
-            text=df["月份"].astype(int).astype(str) + "月",
+            text=df["期間"],
             color_continuous_scale=[[0, BLUE], [0.55, ORANGE], [1, "#B42318"]],
             title="人數、溫度與用電的關係",
             labels={"住宿人數": "住宿人數（人）", "總用電_kWh": "用電量（度）", "日平均溫度_C": "溫度（°C）"},
@@ -473,7 +553,7 @@ elif page == "② 住宿人數與開館":
 elif page == "③ 電都用到哪裡":
     st.header("③ 電都用到哪裡")
     long_df = df.melt(
-        id_vars="月份",
+        id_vars=["年份", "月份", "期間"],
         value_vars=["基礎用電", "照明用電", "熱水用電_kWh", "冷氣用電", "其他用電"],
         var_name="用電類別",
         value_name="用電量_kWh",
@@ -488,18 +568,18 @@ elif page == "③ 電都用到哪裡":
     long_df["用電類別"] = long_df["用電類別"].replace(category_names)
     sums = long_df.groupby("用電類別", as_index=False)["用電量_kWh"].sum().sort_values("用電量_kWh", ascending=False)
     main_category = sums.iloc[0]
-    st.info(f"重點：目前估算占比最高的是「{main_category['用電類別']}」，全年約 {main_category['用電量_kWh']:,.0f} 度。")
+    st.info(f"重點：目前估算占比最高的是「{main_category['用電類別']}」，資料期間約 {main_category['用電量_kWh']:,.0f} 度。")
 
     area = px.area(
         long_df,
-        x="月份",
+        x="期間",
         y="用電量_kWh",
         color="用電類別",
         color_discrete_sequence=COLORS,
         title="每月各類用電的變化",
         labels={"用電量_kWh": "用電量（度）"},
     )
-    area.update_xaxes(dtick=1)
+    area.update_xaxes(tickangle=-45)
     st.plotly_chart(standard_chart(area), use_container_width=True, config=CHART_CONFIG)
 
     left, right = st.columns(2)
@@ -510,16 +590,16 @@ elif page == "③ 電都用到哪裡":
             names="用電類別",
             hole=0.42,
             color_discrete_sequence=COLORS,
-            title="全年用電占比",
+            title="資料期間用電占比",
         )
         pie.update_traces(textposition="inside", textinfo="label+percent", textfont_size=17)
         st.plotly_chart(standard_chart(pie), use_container_width=True, config=CHART_CONFIG)
     with right:
-        pivot = long_df.pivot(index="用電類別", columns="月份", values="用電量_kWh").reindex(sums["用電類別"])
+        pivot = long_df.pivot(index="用電類別", columns="期間", values="用電量_kWh").reindex(sums["用電類別"])
         heatmap = go.Figure(
             go.Heatmap(
                 z=pivot.values,
-                x=[f"{int(month)}月" for month in pivot.columns],
+                x=list(pivot.columns),
                 y=pivot.index,
                 colorscale=[[0, "#F2F7FF"], [1, BLUE]],
                 colorbar=dict(title="度", tickfont=dict(size=15)),
@@ -550,9 +630,9 @@ elif page == "④ 可以省多少電":
     saving_rate = saving / total * 100
 
     s1, s2, s3 = st.columns(3)
-    s1.metric("一年可以省電", f"{saving:,.0f} 度", f"約 {saving_rate:.1f}%")
-    s2.metric("一年可以省錢", f"{saving * electricity_price:,.0f} 元")
-    s3.metric("一年可以減碳", f"{saving * carbon_factor / 1000:,.2f} 公噸")
+    s1.metric("資料期間可以省電", f"{saving:,.0f} 度", f"約 {saving_rate:.1f}%")
+    s2.metric("資料期間可以省錢", f"{saving * electricity_price:,.0f} 元")
+    s3.metric("資料期間可以減碳", f"{saving * carbon_factor / 1000:,.2f} 公噸")
 
     before_after = pd.DataFrame({"情況": ["改善前", "改善後"], "用電量": [total, total - saving]})
     compare = px.bar(
@@ -563,7 +643,7 @@ elif page == "④ 可以省多少電":
         text="用電量",
         color_discrete_map={"改善前": GRAY, "改善後": GREEN},
         title="改善前後用電比較",
-        labels={"用電量": "全年用電（度）"},
+        labels={"用電量": "資料期間用電（度）"},
     )
     compare.update_traces(texttemplate="%{text:,.0f} 度", textposition="outside")
 
@@ -606,12 +686,15 @@ elif page == "⑤ 下個月用電預測":
         model, cv_predictions, metrics, uncertainty, coefficients = build_energy_model(model_df)
         model_df["交叉驗證預測_kWh"] = cv_predictions
 
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("交叉驗證 R²", f"{metrics['CV_R2']:.3f}")
         m2.metric("平均絕對誤差 MAE", f"{metrics['MAE']:,.0f} 度")
         m3.metric("均方根誤差 RMSE", f"{metrics['RMSE']:,.0f} 度")
         m4.metric("平均百分比誤差", f"{metrics['MAPE']:.1f}%")
-        st.caption("以上為留一法（每次保留 1 筆作測試）的樣本外評估，不是只看模型記住訓練資料的結果。")
+        m5.metric("比月平均基準改善", f"{metrics['MAE_IMPROVEMENT']:.1f}%")
+        st.caption(
+            "以上為留一法（每次保留 1 筆作測試）的樣本外評估；最後一項比較 Ridge 與只用其餘月份平均值的基準模型。"
+        )
         if metrics["CV_R2"] < 0:
             st.warning("目前交叉驗證 R² 小於 0，代表示範資料不足以形成穩定預測；此結果本身應列入專題限制。")
         elif metrics["CV_R2"] < 0.5:
@@ -622,7 +705,7 @@ elif page == "⑤ 下個月用電預測":
         predicted_chart = go.Figure()
         predicted_chart.add_trace(
             go.Scatter(
-                x=model_df["月份"],
+                x=model_df["期間"],
                 y=model_df["總用電_kWh"],
                 name="實際用電",
                 mode="lines+markers",
@@ -632,7 +715,7 @@ elif page == "⑤ 下個月用電預測":
         )
         predicted_chart.add_trace(
             go.Scatter(
-                x=model_df["月份"],
+                x=model_df["期間"],
                 y=model_df["交叉驗證預測_kWh"],
                 name="留一法預測",
                 mode="lines+markers",
@@ -640,8 +723,8 @@ elif page == "⑤ 下個月用電預測":
                 marker=dict(size=10, symbol="diamond"),
             )
         )
-        predicted_chart.update_layout(title="過去實際用電和模型估計", xaxis_title="月份", yaxis_title="用電量（度）")
-        predicted_chart.update_xaxes(dtick=1)
+        predicted_chart.update_layout(title="過去實際用電和模型估計", xaxis_title="年月", yaxis_title="用電量（度）")
+        predicted_chart.update_xaxes(tickangle=-45)
         st.plotly_chart(standard_chart(predicted_chart), use_container_width=True, config=CHART_CONFIG)
 
         coefficient_fig = px.bar(
@@ -695,7 +778,7 @@ elif page == "⑤ 下個月用電預測":
             st.write(
                 "模型輸入為住宿人日、冷房度日與開館天數；Ridge 迴歸可降低少量資料中因變數高度相關造成的係數不穩定。"
                 f"訓練資料 R² 為 {metrics['TRAIN_R2']:.3f}，留一法交叉驗證 R² 為 {metrics['CV_R2']:.3f}。"
-                "正式報告應以交叉驗證結果為主，且資料只有約 12 個月時，結果適合做情境比較，不應宣稱為精準電費預報。"
+                "正式報告應以交叉驗證結果為主；資料少於 24 個月時，結果適合做情境比較，不應宣稱為精準電費預報。"
             )
 
     with st.expander("查看完整資料表"):
@@ -773,14 +856,7 @@ elif page == "⑥ 冷氣機型與故障風險":
 
     monthly_ac_kwh = operation["每月耗電_kWh"].sum()
     annual_failure_percent = risk["annual_probability"] * 100
-    if annual_failure_percent < 5:
-        risk_level = "低"
-    elif annual_failure_percent < 15:
-        risk_level = "中"
-    elif annual_failure_percent < 30:
-        risk_level = "高"
-    else:
-        risk_level = "極高"
+    risk_level = classify_ac_risk(annual_failure_percent)
 
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("冷氣每月估計耗電", f"{monthly_ac_kwh:,.0f} 度")
@@ -858,6 +934,152 @@ elif page == "⑥ 冷氣機型與故障風險":
         "text/csv",
         use_container_width=True,
     )
+
+    st.divider()
+    st.subheader("批次設備清冊分析")
+    st.write("可上傳完整 Excel 蒐集工作簿，或只含冷氣設備欄位的 CSV／Excel；系統會依風險由高到低排序。")
+    batch_left, batch_right = st.columns(2)
+    with batch_left:
+        ac_batch_upload = st.file_uploader(
+            "上傳冷氣設備清冊",
+            type=["csv", "xlsx"],
+            key="ac_batch_upload",
+        )
+    with batch_right:
+        st.download_button(
+            "下載冷氣清冊 CSV 範本",
+            AC_BATCH_SAMPLE.to_csv(index=False).encode("utf-8-sig"),
+            "冷氣設備清冊範本.csv",
+            "text/csv",
+            use_container_width=True,
+        )
+
+    if ac_batch_upload:
+        try:
+            ac_batch_source = read_ac_upload(ac_batch_upload.getvalue(), ac_batch_upload.name)
+        except Exception as exc:
+            st.error(f"冷氣設備清冊無法讀取：{exc}")
+        else:
+            ac_batch_source = ac_batch_source.dropna(how="all")
+            batch_missing = [column for column in AC_BATCH_REQUIRED if column not in ac_batch_source.columns]
+            if batch_missing:
+                st.error("冷氣設備清冊缺少欄位：" + "、".join(batch_missing))
+            elif ac_batch_source.empty:
+                st.error("冷氣設備清冊沒有可分析的資料列。")
+            else:
+                ac_batch_df = ac_batch_source[AC_BATCH_REQUIRED].copy()
+                text_columns = ["設備群組_ID", "位置", "冷氣機型"]
+                numeric_columns = [column for column in AC_BATCH_REQUIRED if column not in text_columns]
+                for column in numeric_columns:
+                    ac_batch_df[column] = pd.to_numeric(ac_batch_df[column], errors="coerce")
+
+                batch_errors = []
+                blank_text = ac_batch_df[text_columns].fillna("").astype(str).apply(lambda values: values.str.strip().eq(""))
+                if blank_text.any().any() or ac_batch_df[numeric_columns].isna().any().any():
+                    batch_errors.append("有空白或非數字內容")
+                if ac_batch_df["設備群組_ID"].duplicated().any():
+                    batch_errors.append("設備群組 ID 重複")
+                invalid_models = sorted(set(ac_batch_df["冷氣機型"].dropna()) - set(AC_MODELS))
+                if invalid_models:
+                    batch_errors.append("未知冷氣機型：" + "、".join(map(str, invalid_models)))
+
+                rate_columns = ["使用率_00_06", "使用率_06_12", "使用率_12_18", "使用率_18_24"]
+                for column in rate_columns:
+                    ac_batch_df[column] = np.where(
+                        ac_batch_df[column].between(0, 1),
+                        ac_batch_df[column] * 100,
+                        ac_batch_df[column],
+                    )
+
+                range_checks = {
+                    "額定功率_kW": (0.2, 10),
+                    "台數": (1, 2000),
+                    "平均機齡_年": (0, 30),
+                    "日平均溫度_C": (-10, 45),
+                    "設定溫度_C": (18, 30),
+                    "每月運轉天數": (1, 31),
+                    "距上次保養_月": (0, 60),
+                    "近兩年故障次數": (0, 10),
+                }
+                range_checks.update({column: (0, 100) for column in rate_columns})
+                for column, (lower, upper) in range_checks.items():
+                    if not ac_batch_df[column].between(lower, upper).all():
+                        batch_errors.append(f"{column} 必須介於 {lower} 和 {upper}")
+                integer_columns = ["台數", "每月運轉天數", "距上次保養_月", "近兩年故障次數"]
+                for column in integer_columns:
+                    if not np.allclose(ac_batch_df[column].dropna(), np.round(ac_batch_df[column].dropna())):
+                        batch_errors.append(f"{column} 必須是整數")
+
+                if batch_errors:
+                    st.error("；".join(dict.fromkeys(batch_errors)))
+                else:
+                    batch_results = []
+                    for _, ac_row in ac_batch_df.iterrows():
+                        group_operation, group_risk = estimate_ac_operation(
+                            model_name=str(ac_row["冷氣機型"]),
+                            quantity=int(ac_row["台數"]),
+                            rated_power_kw=float(ac_row["額定功率_kW"]),
+                            average_temp=float(ac_row["日平均溫度_C"]),
+                            setpoint=float(ac_row["設定溫度_C"]),
+                            operating_days=int(ac_row["每月運轉天數"]),
+                            usage_rates=[float(ac_row[column]) for column in rate_columns],
+                            age_years=float(ac_row["平均機齡_年"]),
+                            maintenance_months=int(ac_row["距上次保養_月"]),
+                            previous_faults=int(ac_row["近兩年故障次數"]),
+                        )
+                        group_probability = group_risk["annual_probability"] * 100
+                        group_level = classify_ac_risk(group_probability)
+                        recommendation = (
+                            "優先檢查／評估汰換"
+                            if group_probability >= 15 or ac_row["距上次保養_月"] >= 12
+                            else "依週期保養"
+                        )
+                        batch_results.append(
+                            {
+                                "設備群組_ID": ac_row["設備群組_ID"],
+                                "位置": ac_row["位置"],
+                                "冷氣機型": ac_row["冷氣機型"],
+                                "台數": int(ac_row["台數"]),
+                                "每月耗電_kWh": group_operation["每月耗電_kWh"].sum(),
+                                "單台年度故障機率_%": group_probability,
+                                "全年預期故障台數": group_risk["expected_failures"],
+                                "風險等級": group_level,
+                                "建議": recommendation,
+                            }
+                        )
+
+                    batch_result_df = pd.DataFrame(batch_results).sort_values(
+                        "單台年度故障機率_%", ascending=False
+                    )
+                    b1, b2, b3 = st.columns(3)
+                    b1.metric("設備群組", f"{len(batch_result_df)} 組")
+                    b2.metric("估計月耗電合計", f"{batch_result_df['每月耗電_kWh'].sum():,.0f} 度")
+                    b3.metric(
+                        "高／極高風險群組",
+                        f"{batch_result_df['風險等級'].isin(['高', '極高']).sum()} 組",
+                    )
+
+                    batch_chart = px.bar(
+                        batch_result_df,
+                        x="設備群組_ID",
+                        y="單台年度故障機率_%",
+                        color="風險等級",
+                        text="單台年度故障機率_%",
+                        category_orders={"風險等級": ["低", "中", "高", "極高"]},
+                        color_discrete_map={"低": GREEN, "中": ORANGE, "高": "#B54708", "極高": "#B42318"},
+                        title="冷氣設備群組故障風險排名",
+                        labels={"單台年度故障機率_%": "年度故障機率（%）"},
+                    )
+                    batch_chart.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+                    st.plotly_chart(standard_chart(batch_chart), use_container_width=True, config=CHART_CONFIG)
+                    st.dataframe(batch_result_df.round(2), use_container_width=True, hide_index=True)
+                    st.download_button(
+                        "下載批次冷氣風險排名",
+                        batch_result_df.round(3).to_csv(index=False).encode("utf-8-sig"),
+                        "批次冷氣耗電與故障風險排名.csv",
+                        "text/csv",
+                        use_container_width=True,
+                    )
 
 st.divider()
 st.caption("提示：圖表中的『度』就是 kWh；把滑鼠移到圖上，可以看到詳細數字。")
