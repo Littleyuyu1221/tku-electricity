@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import subprocess
 import sys
 import zipfile
@@ -35,8 +36,15 @@ def add(checks: list[Check], condition: bool, item: str, evidence: str, failure:
 
 
 def latest_package() -> Path | None:
-    packages = sorted(OUTPUTS.glob("tku-electricity-專題完整包-v*.zip"))
-    return packages[-1] if packages else None
+    packages = list(OUTPUTS.glob("tku-electricity-專題完整包-v*.zip"))
+    if not packages:
+        return None
+
+    def version_number(path: Path) -> int:
+        match = re.search(r"-v(\d+)\.zip$", path.name)
+        return int(match.group(1)) if match else -1
+
+    return max(packages, key=version_number)
 
 
 def run_checks() -> list[Check]:
@@ -54,6 +62,9 @@ def run_checks() -> list[Check]:
         "校方資料申請與研究使用說明.docx",
         "校方資料申請信範本.md",
         "專題送審完成度報告.md",
+        "預覽-首頁.png",
+        "預覽-用電預測.png",
+        "預覽-冷氣風險.png",
     ]
     missing = [name for name in required if not (OUTPUTS / name).is_file()]
     add(checks, not missing, "核心交付物", f"{len(required)} 項必要檔案皆存在", "缺少：" + "、".join(missing))
@@ -160,7 +171,7 @@ def run_checks() -> list[Check]:
 
     package = latest_package()
     if package is None and OUTPUTS == ROOT:
-        checks.append(Check("PASS", "完整交付包", "目前從已解壓的完整交付包執行，14 項檔案由其他檢查逐項驗證"))
+        checks.append(Check("PASS", "完整交付包", f"目前從已解壓的完整交付包執行，{len(required) + 2} 項檔案由其他檢查逐項驗證"))
     elif package is None:
         checks.append(Check("FAIL", "完整交付包", "找不到版本化 ZIP"))
     else:
