@@ -1,4 +1,5 @@
 import io
+import json
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,20 @@ CHART_CONFIG = {
     "scrollZoom": False,
     "responsive": True,
 }
+
+BASE_DIR = Path(__file__).resolve().parent
+OFFICIAL_MODEL_PATH = BASE_DIR / "models" / "official_models.json"
+OFFICIAL_MONTHLY_PATH = BASE_DIR / "data" / "songtao_model_monthly_base.csv"
+OFFICIAL_ENERGY_EVALUATION_PATH = BASE_DIR / "data" / "energy_model_forward_validation.csv"
+
+
+def load_official_models() -> dict:
+    if not OFFICIAL_MODEL_PATH.exists():
+        return {}
+    return json.loads(OFFICIAL_MODEL_PATH.read_text(encoding="utf-8"))
+
+
+OFFICIAL_MODELS = load_official_models()
 
 AC_MODELS = {
     "窗型定頻（舊式）": {
@@ -247,10 +262,192 @@ def classify_ac_risk(annual_failure_percent: float) -> str:
     return "極高"
 
 
-st.title("⚡ 宿舍用電分析與節能系統")
-st.write("透過互動圖表分析住宿人數、開館天數、溫度和用電的關係。")
+def official_energy_prediction(
+    year: int,
+    month: int,
+    resident_count: int,
+    resident_days: int,
+    open_days: int,
+    temperature_c: float,
+) -> tuple[float, float, float, dict[str, float]]:
+    model = OFFICIAL_MODELS["energy_model"]["model"]
+    feature_values = {
+        "estimated_resident_days": float(resident_count * resident_days),
+        "cooling_degree_days_26c": max(float(temperature_c) - 26.0, 0.0) * float(open_days),
+        "estimated_open_days": float(open_days),
+        "time_index": float((year - 2021) * 12 + month),
+    }
+    means = np.asarray(model["feature_mean"], dtype=float)
+    scales = np.asarray(model["feature_scale"], dtype=float)
+    beta = np.asarray(model["residual_intercept_and_standardized_coefficients"], dtype=float)
+    raw = np.asarray([feature_values[name] for name in model["feature_names"]], dtype=float)
+    standardized = (raw - means) / scales
+    residual_adjustment = float(beta[0] + standardized @ beta[1:])
+    month_baselines = {int(key): float(value) for key, value in model["month_baseline_kwh"].items()}
+    baseline = month_baselines.get(month, float(model["global_baseline_kwh"]))
+    prediction = max(0.0, baseline + residual_adjustment)
+    interval = model["prediction_interval"]
+    lower = max(0.0, prediction + float(interval["lower_residual_quantile_5pct_kwh"]))
+    upper = max(lower, prediction + float(interval["upper_residual_quantile_95pct_kwh"]))
+    return prediction, lower, upper, feature_values
 
-SAMPLE = pd.DataFrame(
+
+def official_ac_risk_prediction(
+    building_code: str,
+    brand_group: str,
+    model_prefix: str,
+    age_years: float,
+    prior_fault_count: int,
+    prior_service_count: int,
+    years_since_last_service: float,
+    fault_last_year: bool,
+) -> tuple[float, str, pd.DataFrame]:
+    model = OFFICIAL_MODELS["ac_failure_risk_model"]["model"]
+    numeric = {
+        "age_years": float(age_years),
+        "prior_fault_count_log1p": float(np.log1p(prior_fault_count)),
+        "prior_service_count_log1p": float(np.log1p(prior_service_count)),
+        "years_since_last_service": float(years_since_last_service),
+        "fault_last_year": float(bool(fault_last_year)),
+    }
+    means = np.asarray(model["numeric_mean"], dtype=float)
+    scales = np.asarray(model["numeric_scale"], dtype=float)
+    standardized = (
+        np.asarray([numeric[name] for name in model["numeric_features"]], dtype=float) - means
+    ) / scales
+    encoded = list(standardized)
+    category_values = {
+        "building_code": building_code,
+        "brand_group": brand_group,
+        "model_prefix": model_prefix,
+    }
+    encoded_names = ["機齡", "累計故障", "累計維修／保養", "距上次維修／保養", "前一年故障"]
+    for column in model["categorical_features"]:
+        categories = model["categories"][column]
+        selected = category_values[column]
+        for category in categories[1:]:
+            encoded.append(float(selected == category))
+            encoded_names.append(f"{column}={category}")
+    coefficients = np.asarray(model["coefficients"], dtype=float)
+    linear = float(coefficients[0] + np.asarray(encoded) @ coefficients[1:])
+    probability = float(1 / (1 + np.exp(-np.clip(linear, -35, 35))))
+    contributions = np.asarray(encoded) * coefficients[1:]
+    contribution_frame = pd.DataFrame(
+        {"影響因子": encoded_names, "對風險分數的貢獻": contributions}
+    ).sort_values("對風險分數的貢獻")
+    if probability < 0.15:
+        band = "相對低"
+    elif probability < 0.28:
+        band = "相對中"
+    elif probability < 0.35:
+        band = "相對高"
+    else:
+        band = "最高風險群"
+    return probability, band, contribution_frame
+
+
+def render_official_energy_model(electricity_price: float, carbon_factor: float) -> None:
+    energy = OFFICIAL_MODELS["energy_model"]
+    validation = energy["validation"]
+    metrics = validation["model_metrics"]
+    baseline = validation["seasonal_median_baseline_metrics"]
+    st.header("⑤ 正式資料用電預測")
+    st.info(
+        "模型以三館合計月用電為目標，使用月份季節中位數，再由住宿人日、26°C 冷房度日、"
+        "估算開館天數與時間趨勢修正。驗證採逐月向前切分，不讓模型看到未來資料。"
+    )
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("向前驗證 R²", f"{metrics['r2']:.3f}")
+    m2.metric("MAE", f"{metrics['mae_kwh']:,.0f} 度")
+    m3.metric("RMSE", f"{metrics['rmse_kwh']:,.0f} 度")
+    m4.metric("sMAPE", f"{metrics['smape_percent']:.1f}%")
+    m5.metric("比季節基準改善", f"{validation['mae_improvement_vs_baseline_percent']:.1f}%")
+    st.caption(
+        f"共 {energy['training_period']['months']} 個訓練月份；其中 {validation['test_months']} 個月份做樣本外驗證。"
+        f"季節基準 MAE 為 {baseline['mae_kwh']:,.0f} 度。"
+    )
+
+    if OFFICIAL_ENERGY_EVALUATION_PATH.exists():
+        evaluation = pd.read_csv(OFFICIAL_ENERGY_EVALUATION_PATH, encoding="utf-8-sig")
+        comparison = go.Figure()
+        comparison.add_trace(
+            go.Scatter(
+                x=evaluation["date"], y=evaluation["actual_kwh"], name="實際用電",
+                mode="lines+markers", line=dict(color=BLUE, width=4)
+            )
+        )
+        comparison.add_trace(
+            go.Scatter(
+                x=evaluation["date"], y=evaluation["predicted_kwh"], name="向前預測",
+                mode="lines+markers", line=dict(color=ORANGE, width=3, dash="dash")
+            )
+        )
+        comparison.update_layout(title="正式資料的逐月向前驗證", xaxis_title="月份", yaxis_title="用電量（度）")
+        comparison.update_xaxes(tickangle=-45)
+        st.plotly_chart(standard_chart(comparison), use_container_width=True, config=CHART_CONFIG)
+
+    coefficients = OFFICIAL_MODELS["energy_model"]["model"]
+    coefficient_frame = pd.DataFrame(
+        {
+            "影響因子": ["住宿人日", "26°C 冷房度日", "估算開館天數", "時間趨勢"],
+            "標準化殘差修正係數": coefficients["residual_intercept_and_standardized_coefficients"][1:],
+        }
+    )
+    coefficient_chart = px.bar(
+        coefficient_frame.sort_values("標準化殘差修正係數"),
+        x="標準化殘差修正係數", y="影響因子", orientation="h",
+        color="標準化殘差修正係數",
+        color_continuous_scale=[[0, ORANGE], [0.5, "#F3F4F6"], [1, BLUE]],
+        color_continuous_midpoint=0,
+        title="月份季節基準之外，各因子的修正方向",
+    )
+    coefficient_chart.update_coloraxes(showscale=False)
+    st.plotly_chart(standard_chart(coefficient_chart, 330), use_container_width=True, config=CHART_CONFIG)
+
+    st.subheader("設定要預測的月份")
+    row1, row2, row3 = st.columns(3)
+    forecast_year = row1.number_input("年份", min_value=2021, max_value=2030, value=2026, step=1)
+    forecast_month = row2.selectbox("月份", [1, 2, 3, 4, 5, 6, 9, 10, 11, 12], index=6)
+    forecast_temp = row3.number_input("淡水月平均溫度（°C）", min_value=5.0, max_value=40.0, value=28.5, step=0.5)
+    row4, row5, row6 = st.columns(3)
+    forecast_people = row4.number_input("住宿人數（人）", min_value=0, max_value=3000, value=2000, step=10)
+    forecast_stay_days = row5.number_input("住宿天數（天）", min_value=0, max_value=31, value=25)
+    forecast_open_days = row6.number_input("開館天數（天）", min_value=1, max_value=31, value=25)
+    if forecast_stay_days > forecast_open_days:
+        st.error("住宿天數不可大於開館天數。")
+        return
+    forecast, lower, upper, feature_values = official_energy_prediction(
+        int(forecast_year), int(forecast_month), int(forecast_people),
+        int(forecast_stay_days), int(forecast_open_days), float(forecast_temp)
+    )
+    f1, f2, f3 = st.columns(3)
+    f1.metric("預測三館合計用電", f"{forecast:,.0f} 度")
+    f2.metric("估計電費", f"{forecast * electricity_price:,.0f} 元")
+    f3.metric("估計碳排", f"{forecast * carbon_factor / 1000:,.2f} 公噸")
+    st.write(f"依向前驗證殘差形成的經驗 90% 範圍：約 **{lower:,.0f}–{upper:,.0f} 度**。")
+    official_monthly = pd.read_csv(OFFICIAL_MONTHLY_PATH, encoding="utf-8-sig")
+    ready = official_monthly[official_monthly["model_ready"] == True]  # noqa: E712
+    ranges = {
+        "estimated_resident_days": "住宿人日",
+        "cooling_degree_days_26c": "冷房度日",
+        "estimated_open_days": "開館天數",
+    }
+    outside = [
+        label for column, label in ranges.items()
+        if feature_values[column] < ready[column].min() or feature_values[column] > ready[column].max()
+    ]
+    if outside:
+        st.warning("這個情境超出正式資料範圍（" + "、".join(outside) + "），屬外插預測，請降低解讀強度。")
+    with st.expander("資料範圍與限制"):
+        st.write("訓練期間為 2021-09 至 2026-06；114 年 9 月二館電表明示異常，另有統計低離群月份，均未納入嚴格模型。")
+        st.write("住宿人數只有三館合計；開館天數缺少閉館日，因此住宿天數與開館天數為透明估算，不是刷卡或門禁實住紀錄。")
+        st.write("熱水沒有獨立電表，模型預測的是總用電，不能拆解為冷氣、熱水與照明的實測比例。")
+
+
+st.title("⚡ 淡江松濤館用電與冷氣風險系統")
+st.write("整合校方近五年用電、住宿人數、開館日期、530 台現有冷氣與 2,442 筆修繕紀錄。")
+
+DEMO_SAMPLE = pd.DataFrame(
     {
         "年份": [2024] * 12,
         "月份": range(1, 13),
@@ -262,6 +459,28 @@ SAMPLE = pd.DataFrame(
         "日平均溫度_C": [15.2, 15.6, 17.5, 21.2, 24.1, 27.2, 28.9, 28.7, 27.1, 24.1, 20.6, 16.9],
     }
 )
+if OFFICIAL_MONTHLY_PATH.exists():
+    official_monthly_source = pd.read_csv(OFFICIAL_MONTHLY_PATH, encoding="utf-8-sig")
+    official_monthly_source = official_monthly_source[
+        official_monthly_source["model_ready"] == True  # noqa: E712
+    ].copy()
+    SAMPLE = pd.DataFrame(
+        {
+            "年份": official_monthly_source["gregorian_year"],
+            "月份": official_monthly_source["month"],
+            "總用電_kWh": official_monthly_source["songtao_total_kwh"],
+            # 校方未提供熱水獨立電表。保留欄位只為相容既有上傳格式，畫面會標示不可拆分。
+            "熱水用電_kWh": 0.0,
+            "住宿天數": official_monthly_source["estimated_open_days"],
+            "住宿人數": official_monthly_source["songtao_resident_count"],
+            "開館天數": official_monthly_source["estimated_open_days"],
+            "日平均溫度_C": official_monthly_source["daily_mean_temperature_c"],
+        }
+    ).reset_index(drop=True)
+    OFFICIAL_DEFAULT_AVAILABLE = True
+else:
+    SAMPLE = DEMO_SAMPLE.copy()
+    OFFICIAL_DEFAULT_AVAILABLE = False
 REQUIRED = list(SAMPLE.columns)
 
 
@@ -290,10 +509,10 @@ def read_ac_upload(raw: bytes, name: str) -> pd.DataFrame:
 with st.sidebar:
     st.header("⚙️ 簡單設定")
     uploaded = st.file_uploader("選擇用電資料", type=["csv", "xlsx"])
-    st.caption("沒有選擇檔案時，會使用示範資料。")
+    st.caption("沒有上傳檔案時，會使用已匿名彙整的松濤館正式資料。" if OFFICIAL_DEFAULT_AVAILABLE else "沒有選擇檔案時，會使用示範資料。")
     st.download_button(
         "下載資料填寫範本",
-        SAMPLE.to_csv(index=False).encode("utf-8-sig"),
+        DEMO_SAMPLE.to_csv(index=False).encode("utf-8-sig"),
         "宿舍用電資料範本.csv",
         "text/csv",
         use_container_width=True,
@@ -307,7 +526,8 @@ with st.sidebar:
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-    bed_capacity = st.number_input("宿舍總床位數", min_value=1, value=700, step=10)
+    default_capacity = max(700, int(SAMPLE["住宿人數"].max()) + 100)
+    bed_capacity = st.number_input("宿舍總床位數", min_value=1, value=default_capacity, step=10)
 
     with st.expander("進階設定（一般不用更改）"):
         ac_base_temp = st.slider("冷氣啟用溫度（°C）", 20.0, 28.0, 23.0, 0.5)
@@ -327,6 +547,12 @@ try:
 except Exception as exc:
     st.error(f"檔案無法讀取：{exc}")
     st.stop()
+
+using_official_default = uploaded is None and OFFICIAL_DEFAULT_AVAILABLE
+hotwater_submeter_available = not using_official_default
+if using_official_default:
+    st.success("目前顯示：松濤一至三館正式彙整資料。房號、財產編號與人員欄位未放入公開網站。")
+    st.caption("模型資料期間：2021-09 至 2026-06；官方氣溫來源為中央氣象署淡水站（466900）。")
 
 if "平均溫度_C" in source.columns and "日平均溫度_C" not in source.columns:
     source = source.rename(columns={"平均溫度_C": "日平均溫度_C"})
@@ -552,6 +778,11 @@ elif page == "② 住宿人數與開館":
 
 elif page == "③ 電都用到哪裡":
     st.header("③ 電都用到哪裡")
+    if not hotwater_submeter_available:
+        st.warning(
+            "校方目前提供的是總用電，沒有熱水、冷氣與照明的獨立電表；本頁除總用電外皆為工程估算，"
+            "『其他』也包含尚未分表的熱水負載，不能當成實測占比。"
+        )
     long_df = df.melt(
         id_vars=["年份", "月份", "期間"],
         value_vars=["基礎用電", "照明用電", "熱水用電_kWh", "冷氣用電", "其他用電"],
@@ -614,7 +845,11 @@ elif page == "④ 可以省多少電":
     st.write("請拖動下面三個設定，圖表和金額會立即更新。")
     temp_raise = st.slider("冷氣溫度提高幾度？", 0.0, 3.0, 1.0, 0.5)
     lighting_saving = st.slider("照明預計節省百分比", 0, 50, 20, 5) / 100
-    hotwater_saving = st.slider("熱水預計節省百分比", 0, 40, 10, 5) / 100
+    if hotwater_submeter_available:
+        hotwater_saving = st.slider("熱水預計節省百分比", 0, 40, 10, 5) / 100
+    else:
+        hotwater_saving = 0.0
+        st.info("未提供熱水獨立電表，因此正式資料模式不估算熱水節電量。")
 
     new_ac_raw = np.maximum(0, df["日平均溫度_C"] - (ac_base_temp + temp_raise)) * df["人日"] * 0.29
     ac_saving_ratio = pd.Series(0.0, index=df.index)
@@ -676,6 +911,9 @@ elif page == "④ 可以省多少電":
         st.plotly_chart(standard_chart(contributions), use_container_width=True, config=CHART_CONFIG)
 
 elif page == "⑤ 下個月用電預測":
+    if using_official_default and OFFICIAL_MODELS.get("energy_model"):
+        render_official_energy_model(electricity_price, carbon_factor)
+        st.stop()
     st.header("⑤ 下個月用電預測")
     st.info("以住宿人日、冷房度日及開館天數建立 Ridge 迴歸，並用留一法交叉驗證模型。")
 
@@ -801,7 +1039,12 @@ elif page == "⑤ 下個月用電預測":
 
 elif page == "⑥ 冷氣機型與故障風險":
     st.header("⑥ 冷氣機型、分時耗電與故障風險")
-    st.info("選擇冷氣機型與使用條件，系統會估算四個時段的耗電，並以比例風險模型評估年度故障機率。")
+    official_risk_active = bool(OFFICIAL_MODELS.get("ac_failure_risk_model"))
+    st.info(
+        "分時耗電採額定功率與負載率工程估算；年度故障風險則使用校方現有冷氣與修繕紀錄訓練的模型。"
+        if official_risk_active
+        else "選擇冷氣機型與使用條件，系統會估算四個時段的耗電，並以比例風險模型評估年度故障機率。"
+    )
 
     left, right = st.columns(2)
     with left:
@@ -823,7 +1066,28 @@ elif page == "⑥ 冷氣機型與故障風險":
         ac_setpoint = st.number_input("冷氣設定溫度（°C）", min_value=18.0, max_value=30.0, value=26.0, step=0.5)
         ac_operating_days = st.number_input("每月運轉天數", min_value=1, max_value=31, value=30, step=1)
         maintenance_months = st.number_input("距上次保養（月）", min_value=0, max_value=60, value=8, step=1)
-        previous_faults = st.number_input("近兩年單台平均故障次數", min_value=0, max_value=10, value=0, step=1)
+        previous_faults = st.number_input(
+            "累計故障次數" if official_risk_active else "近兩年單台平均故障次數",
+            min_value=0, max_value=30, value=0, step=1,
+        )
+
+    if official_risk_active:
+        st.subheader("正式修繕紀錄風險條件")
+        risk_col1, risk_col2, risk_col3 = st.columns(3)
+        building_name = risk_col1.selectbox("館別", ["松濤一館", "松濤二館", "松濤三館"])
+        building_code = {"松濤一館": "ZA", "松濤二館": "ZB", "松濤三館": "ZC"}[building_name]
+        brand_group = risk_col2.selectbox("設備廠牌", ["大金", "日立", "萬士益"])
+        model_prefix = risk_col3.selectbox("清冊型號族群", ["FTX", "RAS", "RA/RAC", "其他"])
+        risk_col4, risk_col5 = st.columns(2)
+        prior_service_count = risk_col4.number_input(
+            "累計維修／保養事件數", min_value=int(previous_faults), max_value=100,
+            value=max(int(previous_faults), 2), step=1,
+        )
+        fault_last_year = risk_col5.checkbox("前一年曾有故障", value=bool(previous_faults))
+    else:
+        building_code, brand_group, model_prefix = "ZA", "大金", "FTX"
+        prior_service_count = int(previous_faults)
+        fault_last_year = bool(previous_faults)
 
     st.subheader("各時段預估使用率")
     usage_columns = st.columns(4)
@@ -854,14 +1118,30 @@ elif page == "⑥ 冷氣機型與故障風險":
         previous_faults=int(previous_faults),
     )
 
+    official_contributions = None
+    if official_risk_active:
+        official_probability, official_band, official_contributions = official_ac_risk_prediction(
+            building_code=building_code,
+            brand_group=brand_group,
+            model_prefix=model_prefix,
+            age_years=float(ac_age),
+            prior_fault_count=int(previous_faults),
+            prior_service_count=int(prior_service_count),
+            years_since_last_service=float(maintenance_months) / 12.0,
+            fault_last_year=bool(fault_last_year),
+        )
+        risk["annual_probability"] = official_probability
+        risk["monthly_probability"] = float(1 - (1 - official_probability) ** (1 / 12))
+        risk["expected_failures"] = official_probability * int(ac_quantity)
+
     monthly_ac_kwh = operation["每月耗電_kWh"].sum()
     annual_failure_percent = risk["annual_probability"] * 100
-    risk_level = classify_ac_risk(annual_failure_percent)
+    risk_level = official_band if official_risk_active else classify_ac_risk(annual_failure_percent)
 
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("冷氣每月估計耗電", f"{monthly_ac_kwh:,.0f} 度")
     a2.metric("每月估計電費", f"{monthly_ac_kwh * electricity_price:,.0f} 元")
-    a3.metric("單台年度故障機率", f"{annual_failure_percent:.1f}%", f"{risk_level}風險")
+    a3.metric("單台年度故障風險", f"{annual_failure_percent:.1f}%", risk_level)
     a4.metric("全年預期故障台數", f"{risk['expected_failures']:.1f} 台")
     st.caption(
         f"本情境冷氣耗電約為目前月平均總用電的 {monthly_ac_kwh / average_monthly * 100:.1f}%；"
@@ -883,27 +1163,39 @@ elif page == "⑥ 冷氣機型與故障風險":
         time_chart.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
         st.plotly_chart(standard_chart(time_chart), use_container_width=True, config=CHART_CONFIG)
     with chart_right:
-        risk_factors = pd.DataFrame(
-            {
-                "風險因子": ["機齡", "使用時數", "運轉負載", "保養間隔", "故障紀錄"],
-                "風險倍數": [
-                    risk["age_multiplier"],
-                    risk["usage_multiplier"],
-                    risk["load_multiplier"],
-                    risk["maintenance_multiplier"],
-                    risk["history_multiplier"],
-                ],
-            }
-        )
-        factor_chart = px.bar(
-            risk_factors,
-            x="風險因子",
-            y="風險倍數",
-            color="風險倍數",
-            color_continuous_scale=[[0, LIGHT_BLUE], [1, "#B42318"]],
-            title="故障風險的主要來源",
-        )
-        factor_chart.add_hline(y=1, line_dash="dash", line_color=GRAY)
+        if official_risk_active and official_contributions is not None:
+            factor_chart = px.bar(
+                official_contributions,
+                x="對風險分數的貢獻",
+                y="影響因子",
+                orientation="h",
+                color="對風險分數的貢獻",
+                color_continuous_scale=[[0, BLUE], [0.5, "#F3F4F6"], [1, "#B42318"]],
+                color_continuous_midpoint=0,
+                title="正式 Logistic 模型的風險貢獻",
+            )
+        else:
+            risk_factors = pd.DataFrame(
+                {
+                    "風險因子": ["機齡", "使用時數", "運轉負載", "保養間隔", "故障紀錄"],
+                    "風險倍數": [
+                        risk["age_multiplier"],
+                        risk["usage_multiplier"],
+                        risk["load_multiplier"],
+                        risk["maintenance_multiplier"],
+                        risk["history_multiplier"],
+                    ],
+                }
+            )
+            factor_chart = px.bar(
+                risk_factors,
+                x="風險因子",
+                y="風險倍數",
+                color="風險倍數",
+                color_continuous_scale=[[0, LIGHT_BLUE], [1, "#B42318"]],
+                title="故障風險的主要來源",
+            )
+            factor_chart.add_hline(y=1, line_dash="dash", line_color=GRAY)
         factor_chart.update_coloraxes(showscale=False)
         st.plotly_chart(standard_chart(factor_chart), use_container_width=True, config=CHART_CONFIG)
 
@@ -914,14 +1206,26 @@ elif page == "⑥ 冷氣機型與故障風險":
 
     with st.expander("模型公式、假設與限制"):
         st.markdown(
-            """
-            **分時耗電模型**：台數 × 額定功率 × 機型部分負載係數 × 機齡效率修正 × 溫差負載率 × 時數 × 使用率 × 天數。
-
-            **故障風險模型**：採比例風險概念，將機型基準故障率乘上機齡、運轉時數、負載、保養間隔及既有故障紀錄的風險倍數，再以 `P = 1 - exp(-hazard)` 轉為年度機率。
-
-            目前參數是文獻概念與工程假設的示範校準，不是校內實際故障標籤訓練出的分類器。正式研究應蒐集逐台設備的型號、額定功率、安裝日期、每月運轉時數、保養及故障紀錄，再重新估計係數並驗證 AUC、召回率與校準誤差。
-            """
+            "**分時耗電模型**：台數 × 額定功率 × 機型部分負載係數 × 機齡效率修正 × "
+            "溫差負載率 × 時數 × 使用率 × 天數。額定功率仍應以銘牌或實測為準。"
         )
+        if official_risk_active:
+            official_risk = OFFICIAL_MODELS["ac_failure_risk_model"]
+            official_metrics = official_risk["validation"]["overall_metrics"]
+            st.markdown(
+                "**故障風險模型**：以 3,723 筆設備－年度資料建立 L2 Logistic 迴歸，特徵包含機齡、"
+                "既往故障、維修／保養次數、距上次維修時間、前一年故障、館別、廠牌與型號族群。"
+            )
+            st.write(
+                f"年份向前驗證 ROC-AUC 為 {official_metrics['roc_auc']:.3f}、"
+                f"Brier score 為 {official_metrics['brier_score']:.3f}。此結果適合做相對優先順序，"
+                "不應視為保固或安全認證的精準故障率。"
+            )
+            st.warning(
+                "現有清冊只含仍在場設備，已汰換設備缺席，存在存活者偏差；另有 287 筆歷史事件無法連回現有清冊。"
+            )
+        else:
+            st.write("目前使用工程比例風險假設，尚未連接正式修繕標籤模型。")
 
     download_operation = operation[["時段", "估計室外溫度_C", "使用率_%", "負載率", "每日耗電_kWh", "每月耗電_kWh"]].copy()
     download_operation["冷氣機型"] = ac_model_name
