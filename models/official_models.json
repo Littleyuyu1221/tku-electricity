@@ -1,0 +1,291 @@
+{
+  "generated_at": "2026-08-16T13:52:47",
+  "data_cutoff": "2026-08-13（校方檔名日期）；氣溫擷取至 2026-06 月平均",
+  "energy_model": {
+    "purpose": "預測松濤一至三館合計月用電量，不拆分單館人數。",
+    "training_period": {
+      "start": "2021-09-01",
+      "end": "2026-06-01",
+      "months": 48
+    },
+    "validation": {
+      "method": "擴張視窗逐月向前驗證；每次只用預測月份以前的資料。",
+      "test_months": 24,
+      "model_metrics": {
+        "mae_kwh": 21332.771141635545,
+        "rmse_kwh": 27771.279461306727,
+        "smape_percent": 16.730898576231432,
+        "r2": 0.5859427076010827
+      },
+      "seasonal_median_baseline_metrics": {
+        "mae_kwh": 23039.574635416666,
+        "rmse_kwh": 30237.459718322636,
+        "smape_percent": 18.052187647585885,
+        "r2": 0.5091381656909517
+      },
+      "mae_improvement_vs_baseline_percent": 7.408138044169467
+    },
+    "model": {
+      "type": "月份季節中位數＋標準化 Ridge 殘差修正",
+      "alpha": 0.1,
+      "feature_names": [
+        "estimated_resident_days",
+        "cooling_degree_days_26c",
+        "estimated_open_days",
+        "time_index"
+      ],
+      "month_baseline_kwh": {
+        "1": 94718.0,
+        "2": 60897.105,
+        "3": 170691.0,
+        "4": 151545.8,
+        "5": 163950.0,
+        "6": 135226.0,
+        "9": 99244.559375,
+        "10": 149893.8,
+        "11": 166012.25,
+        "12": 164384.5
+      },
+      "global_baseline_kwh": 150876.97,
+      "feature_mean": [
+        57588.333333333336,
+        8.808333333333337,
+        28.5,
+        36.75
+      ],
+      "feature_scale": [
+        11866.457017108725,
+        21.055678503012498,
+        5.722761571129799,
+        17.15918121589722
+      ],
+      "residual_intercept_and_standardized_coefficients": [
+        3797.2975260416733,
+        22243.576443883154,
+        4762.689467577814,
+        -21304.407284720386,
+        5747.978063039651
+      ],
+      "prediction_interval": {
+        "lower_residual_quantile_5pct_kwh": -45003.121947180116,
+        "upper_residual_quantile_95pct_kwh": 34167.14348273639,
+        "coverage_note": "由逐月向前驗證殘差形成的經驗 90% 區間；樣本數有限。"
+      }
+    },
+    "limitations": [
+      "住宿人數是三館合計且部分年度為學年值，不能解讀為單館人數效果。",
+      "開館天數缺少閉館日，以開館日起至學期邊界估算。",
+      "不含熱水獨立電表，預測目標為總用電。",
+      "民國 114 年 9 月二館電表異常與統計離群月份未納入嚴格模型。"
+    ]
+  },
+  "ac_failure_risk_model": {
+    "purpose": "在現有冷氣清冊內做下一年度故障風險排序；不是全校冷氣的精確故障率。",
+    "training": {
+      "device_years": 3723,
+      "devices": 525,
+      "years": [
+        2017,
+        2025
+      ],
+      "positive_device_years": 760,
+      "event_rate": 0.20413644910018802
+    },
+    "validation": {
+      "method": "以年份向前切分：依序用過去年度預測 2022、2023、2024、2025。",
+      "test_device_years": 1957,
+      "overall_metrics": {
+        "roc_auc": 0.6609330207881273,
+        "average_precision": 0.31632302419919534,
+        "brier_score": 0.1628080860323718,
+        "log_loss": 0.5016011033982949,
+        "event_rate": 0.21870209504343383
+      },
+      "metrics_by_year": {
+        "2022": {
+          "roc_auc": 0.7164380838799443,
+          "average_precision": 0.2823489414943772,
+          "brier_score": 0.11395791924364441,
+          "log_loss": 0.37304631532662536,
+          "event_rate": 0.14380530973451328
+        },
+        "2023": {
+          "roc_auc": 0.6261244043523686,
+          "average_precision": 0.29010740188701584,
+          "brier_score": 0.16495322367244958,
+          "log_loss": 0.5173718912292321,
+          "event_rate": 0.2128099173553719
+        },
+        "2024": {
+          "roc_auc": 0.6892074363992172,
+          "average_precision": 0.45282388124553974,
+          "brier_score": 0.20057988281338468,
+          "log_loss": 0.5895392202491178,
+          "event_rate": 0.29435483870967744
+        },
+        "2025": {
+          "roc_auc": 0.6130960003414864,
+          "average_precision": 0.29000484765970586,
+          "brier_score": 0.16720278616060952,
+          "log_loss": 0.5146609070939387,
+          "event_rate": 0.21714285714285714
+        }
+      },
+      "calibration_deciles": [
+        {
+          "risk_decile": 0,
+          "device_years": 208,
+          "mean_predicted_risk": 0.05865835705748083,
+          "observed_fault_rate": 0.09615384615384616
+        },
+        {
+          "risk_decile": 1,
+          "device_years": 185,
+          "mean_predicted_risk": 0.07392022571712847,
+          "observed_fault_rate": 0.0972972972972973
+        },
+        {
+          "risk_decile": 2,
+          "device_years": 194,
+          "mean_predicted_risk": 0.09211085235116899,
+          "observed_fault_rate": 0.1134020618556701
+        },
+        {
+          "risk_decile": 3,
+          "device_years": 196,
+          "mean_predicted_risk": 0.11766002170745515,
+          "observed_fault_rate": 0.15816326530612246
+        },
+        {
+          "risk_decile": 4,
+          "device_years": 197,
+          "mean_predicted_risk": 0.14053808902188902,
+          "observed_fault_rate": 0.17258883248730963
+        },
+        {
+          "risk_decile": 5,
+          "device_years": 194,
+          "mean_predicted_risk": 0.19633681215422616,
+          "observed_fault_rate": 0.23711340206185566
+        },
+        {
+          "risk_decile": 6,
+          "device_years": 196,
+          "mean_predicted_risk": 0.23938878612633646,
+          "observed_fault_rate": 0.3010204081632653
+        },
+        {
+          "risk_decile": 7,
+          "device_years": 195,
+          "mean_predicted_risk": 0.2719794803563574,
+          "observed_fault_rate": 0.3384615384615385
+        },
+        {
+          "risk_decile": 8,
+          "device_years": 196,
+          "mean_predicted_risk": 0.30213206066060233,
+          "observed_fault_rate": 0.32653061224489793
+        },
+        {
+          "risk_decile": 9,
+          "device_years": 196,
+          "mean_predicted_risk": 0.35083007484183726,
+          "observed_fault_rate": 0.3469387755102041
+        }
+      ]
+    },
+    "model": {
+      "type": "L2 Logistic 迴歸",
+      "l2": 100.0,
+      "numeric_features": [
+        "age_years",
+        "prior_fault_count_log1p",
+        "prior_service_count_log1p",
+        "years_since_last_service",
+        "fault_last_year"
+      ],
+      "categorical_features": [
+        "building_code",
+        "brand_group",
+        "model_prefix"
+      ],
+      "categories": {
+        "building_code": [
+          "ZA",
+          "ZB",
+          "ZC"
+        ],
+        "brand_group": [
+          "大金",
+          "日立",
+          "萬士益"
+        ],
+        "model_prefix": [
+          "FTX",
+          "RA/RAC",
+          "RAS",
+          "其他"
+        ]
+      },
+      "numeric_mean": [
+        11.560838033843675,
+        0.822372635594497,
+        0.9663404741847561,
+        2.560628146024891,
+        0.19312382487241472
+      ],
+      "numeric_scale": [
+        8.017858293902082,
+        0.7146470112429775,
+        0.7802218836378428,
+        2.54827517992239,
+        0.3947493041653951
+      ],
+      "feature_names": [
+        "intercept",
+        "z:age_years",
+        "z:prior_fault_count_log1p",
+        "z:prior_service_count_log1p",
+        "z:years_since_last_service",
+        "z:fault_last_year",
+        "building_code=ZB (vs ZA)",
+        "building_code=ZC (vs ZA)",
+        "brand_group=日立 (vs 大金)",
+        "brand_group=萬士益 (vs 大金)",
+        "model_prefix=RA/RAC (vs FTX)",
+        "model_prefix=RAS (vs FTX)",
+        "model_prefix=其他 (vs FTX)"
+      ],
+      "coefficients": [
+        -1.4341509404243482,
+        0.2917101331716657,
+        0.0832505821153662,
+        0.20697511145918907,
+        0.19599524295201845,
+        0.06439913843372687,
+        0.010241140077341544,
+        0.0058757771906204235,
+        -0.045664069836393185,
+        -0.06446163111929117,
+        -0.03966423829636234,
+        -0.039050177409928576,
+        -0.031411285249393475
+      ]
+    },
+    "current_ranking": {
+      "prediction_year": 2026,
+      "units": 530,
+      "mean_predicted_risk": 0.23022378984845418,
+      "median_predicted_risk": 0.1935892410898715,
+      "maximum_predicted_risk": 0.44148923535933327,
+      "relative_high_or_top_5pct_count": 106
+    },
+    "limitations": [
+      "現有清冊只包含仍在場設備，已汰換設備不在母體內，存在存活者偏差。",
+      "修繕紀錄中的清洗、行政與檢查正常事件已排除為故障標籤，但文字規則仍可能誤分。",
+      "287 筆歷史事件無法連到現有清冊，未用於設備級模型。",
+      "2026 年修繕只到資料提供日，未當成完整年度標籤。"
+    ]
+  },
+  "public_data_rule": "只輸出三館合計或彙整資料；房號、財產編號與設備級風險留在本機 private。"
+}
